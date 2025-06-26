@@ -46,10 +46,10 @@ def punc_norm(text: str) -> str:
         ("—", "-"),
         ("–", "-"),
         (" ,", ","),
-        ("“", "\""),
-        ("”", "\""),
-        ("‘", "'"),
-        ("’", "'"),
+        ("""", """"""),
+        ("", ""),
+        ("'", "'"),
+        ("'", "'"),
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
@@ -179,6 +179,26 @@ class ChatterboxTTS:
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
+
+        # ------------------------------------------------------------------
+        # Safety net: if checkpoint contains English-sized embeddings (704)
+        # but a larger tokenizer is loaded (e.g., 50 k Spanish), automatically
+        # resize embeddings so inference doesn't crash.  This keeps the model
+        # usable immediately after a merge even if the embeddings weren't
+        # copied correctly.  New rows are random until you fine-tune again.
+        # ------------------------------------------------------------------
+        try:
+            current_vocab = t3.text_emb.num_embeddings
+            target_vocab = tokenizer.vocab_size if hasattr(tokenizer, "vocab_size") else current_vocab
+            if target_vocab > current_vocab:
+                print(f"🔧 Auto-resizing text embeddings: {current_vocab} → {target_vocab}")
+                from .models.t3.modules.t3_config import resize_t3_embeddings
+                t3_model_container = cls(t3, s3gen, ve, tokenizer, device, conds=conds)
+                t3_model_container = resize_t3_embeddings(t3_model_container, target_vocab, device)
+                # unpack updated sub-modules
+                t3, s3gen, ve = t3_model_container.t3, t3_model_container.s3gen, t3_model_container.ve
+        except Exception as auto_resize_err:
+            print(f"⚠️ Auto-resize failed: {auto_resize_err}")
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 
