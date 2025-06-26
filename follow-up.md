@@ -32,6 +32,225 @@
 ## la maquina
 
 
+
+### o3 suggestions
+
+1  Why do we see tokens like “Ã©nd”, “Ġreutil”, “izaciÃ³n” in PlanTL-GOB-ES/roberta-base-bne?
+
+•  Byte-level BPE.  
+  RoBERTa (and derivatives such as “roberta-base-bne”) start from the 256 raw UTF-8 bytes and learn byte-pair merges.  
+  A letter like “é” is two bytes (0xC3, 0xA9).  Those bytes correspond to the Unicode code points “Ã” and “©”.  When the model learns merges it may join `Ã` with the next byte, giving merge products such as `Ã©`.  The leading `Ġ` (“unit separator” U+0120) is just the RoBERTa convention for “this sub-word begins with a space”.
+
+•  Corpus noise + merge rules.  
+  Any weird byte sequence that appeared often enough in the training corpus—or was created by repeated merges—can become an entry in the vocabulary, even if it doesn’t look like a valid word.  They don’t harm the model; they’re simply sub-word pieces.
+
+That’s why those tokens also exist in the English RoBERTa vocabulary and in many multilingual models that use byte-level BPE.  
+`pysentimiento/robertuito-base-uncased` was trained with SentencePiece on pre-normalised text, so its merges look “cleaner”.
+
+2  What happens if I switch the tokenizer of a trained model without retraining?
+
+•  Token IDs change → embeddings mismatch.  
+  The text you feed will be broken into **different** IDs.  Unless you simultaneously resize the embedding + head layers **and then train** them, the model will look up random rows for most tokens.  Quality collapses (you’ll get garbage or the model will crash if sizes don’t match).
+
+•  Safe recipe  
+  – Resize (`nn.Embedding` + output head) to the new vocab size.  
+  – Initialise new rows (typically `~𝒩(0, 0.02)`).  
+  – Fine-tune (even a few epochs) so those rows learn meaningful vectors.  
+  – Keep all other weights untouched (your current LoRA workflow already follows that pattern).
+
+Using a brand-new tokenizer **without** that re-training step will almost certainly fail.
+
+3  English words in Argentine Spanish – should we prefer a multilingual tokenizer (e.g. XLM-RoBERTa)?
+
+Trade-offs:
+
+Pros of a big multilingual vocab (e.g. XLM-R 250 k tokens)  
+•  English words, hashtags, URLs, code-switching already have sub-word pieces.  
+•  No out-of-vocab surprises if you later add other languages.
+
+Cons  
+•  Embedding & head layers grow 15–20 × → 3-4 GB extra VRAM for T3-520 M.  
+•  Many tokens will never appear in Argentine data → wasted capacity.  
+•  Training becomes slower and more memory-hungry.
+
+An alternative that usually works better for TTS:
+
+A.  Start from PlanTL’s 52 k Spanish tokenizer (or build your own SentencePiece/BPE ~30 k).  
+B.  Make sure it was trained **with English words left in the corpus** – those get split into sub-words (`re`, `▁play`, `ing`, …).  No OOV, but the vocabulary stays compact.  
+C.  If you really want certain English words pronounced crisply (brand names, slang), add them as *extra* tokens and re-train only the new rows (fast).
+
+4  What is most likely to yield a SOTA TTS model for Argentine Spanish?
+
+Recommended pipeline
+
+1.  **Tokenizer**  
+    •  Train a SentencePiece/BPE tokenizer on a large Argentine-Spanish corpus that also contains the amount of English you expect (tweets, news, subtitles).  
+    •  Target 30 k–50 k tokens – good coverage, moderate size.  
+    •  Add special “SPACE”, `[SOS]`, `[EOS]` tokens exactly as you did.
+
+2.  **Model initialisation**  
+    •  Resize T3 as we’re doing, initialise new rows, freeze everything else.  
+    •  Fine-tune with LoRA (supervised) and/or GRPO.
+
+3.  **Data**  
+    •  High-quality speech recordings from Argentine speakers (voseo, intonation).  
+    •  Transcripts that keep English words when they appear.
+
+4.  **Evaluation**  
+    •  Use MOS listening tests and automatic intelligibility on mixed-language sentences.
+
+5.  **Optional**  
+    •  After Spanish convergence, do a *small* additional LoRA pass with sentences that contain heavy code-switching to polish English word pronunciation.
+
+This route keeps the model light enough for inference, avoids the memory penalty of XLM-R, and still covers English inserts via sub-words.
+
+
+...newMESSAGE
+
+Yes—after the edits we just made the two training scripts satisfy the “safe-switch” requirements and fit the broad pipeline I recommended.
+
+What the scripts do now
+───────────────────────
+1. Load the stock English Chatterbox base model (704-token vocab, all other weights pretrained).
+
+2. Create a Spanish tokenizer (`SpanishTokenizer`, currently PlanTL-RoBERTa-BNE).
+
+3. Call `resize_t3_embeddings`  
+   • Enlarges `text_emb` and `text_head` to the new vocab size.  
+   • Copies the 704 English rows, initialises every new row with small random weights.  
+   • Updates the internal config so the model knows the new vocab size.
+
+4. Replace `model.tokenizer` with the Spanish tokenizer.
+
+5. Inject LoRA layers on the transformer’s attention/FF blocks.
+
+6. Optimiser parameters  
+   • **LoRA A/B matrices** (trainable).  
+   • **All parameters of the resized embedding + head layers** (trainable).  
+   • Everything else in T3/S3Gen/VoiceEncoder stays frozen.
+
+7. Training loop (supervised in `lora.py`, RL-style in `grpo.py`) updates only those trainable sets.
+
+8. Checkpointing  
+   • Saves `model_state_dict` (so the learned Spanish rows aren’t lost).  
+   • Saves `lora_state_dict` and optimiser state.
+
+9. Merge step  
+   • Builds a fresh base model, resizes it again, restores the learned embedding/head weights, applies and merges LoRA, and writes a full Spanish-aware checkpoint plus the tokenizer files.
+
+That is exactly the “safe recipe”:
+
+•  Old tokens preserved → no mis-alignment for the original 704 IDs.  
+•  New tokens get initialised then trained.  
+•  No other parameters are unintentionally updated.
+
+Pipeline compliance
+───────────────────
+•  Tokeniser: using PlanTL 52 k BPE (good coverage for Spanish + English inserts).  
+  (If you later build a custom Argentine corpus tokenizer you would only need to swap the tokenizer + vocab size and re-run the same scripts.)
+
+•  Memory: embedding/head size increase is handled, other layers untouched.
+
+•  Training strategy: LoRA for the heavy transformer, direct training for the new rows—standard lightweight fine-tuning approach.
+
+Remaining optional improvements
+───────────────────────────────
+1. A custom Argentine-Spanish tokenizer (~30 k – 40 k SentencePiece) will reduce VRAM and better capture regional spellings/voseo.
+
+2. If you introduce a **different** tokenizer you must:
+   • Save it beside the model (`save_pretrained`) so inference code can load it.  
+   • Re-run at least a short LoRA/GRPO training so new sub-words get meaningful embeddings—scripts already automate this.
+
+3. For heavy English-Spanish code-switching consider adding a small list of English brand names / slang as *extra special tokens* and re-running the scripts; the resize logic supports that automatically.
+
+But as written, both `lora.py` and `grpo.py` are now “safe” and aligned with a SOTA-style workflow for Argentine Spanish TTS.
+
+
+...newMESSAGE
+
+If the two fine-tuning passes (LoRA → GRPO) with both PlanTL and an alternate tokenizer still fall short of the “wow, that sounds like a native porteño” bar, the problem is almost never the LoRA code itself—it’s the front-end (text, pronunciation) and the data behind the model.  
+
+Below is a practical escalation plan you can share with the team.
+
+────────────────────────────────────────────────────────────
+1  Diagnose what “not SOTA” means  
+────────────────────────────────────────────────────────────
+A. Formal evaluation  
+   •  Run MOS listening tests with at least 20 native Argentine listeners on 50–100 mixed-domain sentences (news, dialogs, social-media code-switching).  
+   •  Collect objective scores: CER on forced-aligned transcripts, prosody F0 RMSE, speaker-similarity cosine, etc.
+
+B. Categorise errors  
+   1. Pronunciation (grapheme-to-phoneme mistakes, English inserts, voseo, yeísmo/seseo).  
+   2. Prosody (intonation, stress, phrase breaks).  
+   3. Voice quality / vocoder artefacts.  
+   4. Latency / stability.
+
+Knowing “where it hurts” dictates the fix.
+
+────────────────────────────────────────────────────────────
+2  Quick wins (1-2 weeks)  
+────────────────────────────────────────────────────────────
+1. Data clean-up & augmentation  
+   •  Remove residual clipping, loudness mismatches, mis-aligned transcripts.  
+   •  Add small but high-quality Argentine corpora: audiobooks, podcast segments, YouTube captions.  
+   •  Oversample sentences with English words, numbers, names, URLs.
+
+2. Front-end tweaks  
+   •  Plug in an es-AR grapheme-to-phoneme (G2P) module (e.g. eSpeak NG, Phonetisaurus) and feed **phoneme tokens** to T3 instead of raw text.  
+     –  Keeps tokenizer small, guarantees pronunciation.  
+   •  Handle diacritics, abbreviations, street names, “vos/VOS-tenés” rules in the text normaliser (`punc_norm_spanish`).
+
+3. Vocoder fine-tune  
+   •  HiFi-GAN or UnivNet finetuned on the same speaker/accent closes the “metallic” gap fast.
+
+4. Targeted LoRA refresh  
+   •  After data / G2P fixes, run another short LoRA+GRPO cycle—loss usually drops sharply.
+
+────────────────────────────────────────────────────────────
+3  Bigger moves (1-2 months)  
+────────────────────────────────────────────────────────────
+A. Custom tokenizer  
+   •  Train a SentencePiece BPE (32 k–40 k) on your **cleaned** text + English loanwords.  
+   •  Re-run the scripts (they already support arbitrary vocab sizes).
+
+B. Phoneme-plus-grapheme dual input  
+   •  Concatenate phoneme sequence and original text tokens (separated by a special token).  
+   •  Gives the model both pronunciation and spelling context; often beats phoneme-only.
+
+C. Prosody modelling  
+   •  Add style/adversarial embeddings (emotion, pitch range) to T3Cond; train with GST-like targets.  
+   •  Reinforcement reward: add mel-spectrogram F0 variance matching to GRPO.
+
+D. Larger base model  
+   •  If VRAM allows, swap T3’s backbone from 520 M to 1 B parameter LLaMA-based config; carry LoRA over.
+
+────────────────────────────────────────────────────────────
+4  What to tell the team today  
+────────────────────────────────────────────────────────────
+“ We’ve implemented Spanish-aware fine-tuning that safely extends the vocabulary and optimises only the new rows + LoRA adapters.  
+Preliminary runs still trail SOTA, and analysis shows the bottleneck is pronunciation and prosody, not the training loop.  
+
+Next sprint we will:
+
+1.   Audit & expand the Argentine speech corpus (more hours, better alignment).  
+2.   Integrate an es-AR G2P front-end and switch T3 to phoneme tokens.  
+3.   Fine-tune a vocoder on the same speaker/accent.  
+4.   Retrain with our existing LoRA / GRPO pipeline (1-week turnaround).  
+
+Parallel tasks:
+
+•  R&D on a custom 35 k token SentencePiece trained on mixed Spanish-English text.  
+•  Prepare MOS evaluation harness with native listeners.
+
+These steps should close the remaining gap to a credible ‘first SOTA’ Argentine-Spanish TTS. ”
+
+Feel free to copy-paste or adapt that roadmap for the next planning meeting.
+
+
+
+
+---------------------------------------
+
 **User**
 
 If I want to finetune chatterbox for spanish, do you think this approach for training will work? do you think I'm training the right parts/modules of the base model? why?
