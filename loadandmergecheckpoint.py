@@ -11,15 +11,22 @@ from huggingface_hub import hf_hub_download
 import shutil
 
 # Hardcoded configuration - MODIFY THESE
-CHECKPOINT_PATH = "./checkpoints_lora/checkpoint_epoch7_step1248.pt"  # Path to your checkpoint
+CHECKPOINT_PATH = "./checkpoints_lora/checkpoint_epoch4_step3087.pt"  # Path to your checkpoint
 OUTPUT_DIR = "./checkpoints_lora/merged_model"  # Where to save the merged model
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda:1" if torch.cuda.is_available() else "cpu"
 
 # LoRA configuration (must match training config)
 LORA_RANK = 32
 LORA_ALPHA = 64
 LORA_DROPOUT = 0.05
 TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+#TARGET_MODULES = [
+    #"q_proj", "v_proj", "k_proj", "o_proj", 
+    #"gate_proj", "up_proj", "down_proj",
+    #"embed_tokens",  # Text embeddings
+    #"lm_head"        # Output projection
+#]
+
 
 
 class LoRALayer(nn.Module):
@@ -103,7 +110,7 @@ def merge_lora_weights(model: ChatterboxTTS, lora_layers: Dict[str, LoRALayer]):
     return model
 
 
-def save_merged_model(model: ChatterboxTTS, output_dir: Path):
+def save_merged_model(model: ChatterboxTTS, output_dir: Path, spanish_tokenizer=None):
     """Save the merged model components"""
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -113,10 +120,31 @@ def save_merged_model(model: ChatterboxTTS, output_dir: Path):
     torch.save(model.t3.state_dict(), output_dir / "t3_cfg.pt")
     torch.save(model.s3gen.state_dict(), output_dir / "s3gen.pt")
     
-    # Copy tokenizer
-    print("Copying tokenizer...")
-    tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
-    shutil.copy(tokenizer_path, output_dir / "tokenizer.json")
+    # Handle tokenizer - CHECK IF SPANISH OR ENGLISH
+    print("Handling tokenizer...")
+    
+    # Check model's vocabulary size to determine tokenizer type
+    vocab_size = model.t3.text_emb.num_embeddings
+    print(f"Model vocabulary size: {vocab_size:,}")
+    
+    if vocab_size > 10000:  # Spanish tokenizer (50k+ tokens)
+        print("🇪🇸 Detected Spanish model - saving Spanish tokenizer")
+        if spanish_tokenizer is None:
+            # Load Spanish tokenizer
+            from transformers import AutoTokenizer
+            spanish_tokenizer = AutoTokenizer.from_pretrained("PlanTL-GOB-ES/roberta-base-bne")
+        
+        # Save Spanish tokenizer
+        spanish_tokenizer.save_pretrained(output_dir, safe_serialization=False)
+        
+        # The tokenizer.json will be created by save_pretrained
+        print(f"✅ Saved Spanish tokenizer with {spanish_tokenizer.vocab_size:,} tokens")
+        
+    else:  # English tokenizer (704 tokens)
+        print("🇺🇸 Detected English model - saving English tokenizer")
+        tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
+        shutil.copy(tokenizer_path, output_dir / "tokenizer.json")
+        print(f"✅ Saved English tokenizer with 704 tokens")
     
     # Save conditionals if they exist
     if model.conds:

@@ -24,8 +24,9 @@ from chatterbox.tts import ChatterboxTTS, punc_norm
 from chatterbox.models.s3gen import S3Gen, S3GEN_SR
 from chatterbox.models.s3tokenizer import S3_SR
 from chatterbox.models.voice_encoder import VoiceEncoder
-from chatterbox.models.tokenizers import EnTokenizer
+from chatterbox.models.tokenizers.tokenizer import EnTokenizer, SpanishTokenizer
 from chatterbox.models.t3.modules.cond_enc import T3Cond
+from chatterbox.models.t3.modules.t3_config import T3SpanishConfig, resize_t3_embeddings
 
 # Add matplotlib imports for metrics tracking
 import matplotlib
@@ -52,10 +53,18 @@ LORA_DROPOUT = 0.05
 GRADIENT_ACCUMULATION_STEPS = 8
 SAVE_EVERY_N_STEPS = 200
 CHECKPOINT_DIR = "checkpoints_lora"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda:2" if torch.cuda.is_available() else "cpu"
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 MAX_TEXT_LENGTH = 1000
 VALIDATION_SPLIT = 0.1
+TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+#TARGET_MODULES = [
+    #"q_proj", "v_proj", "k_proj", "o_proj", 
+    #"gate_proj", "up_proj", "down_proj",
+    #"embed_tokens",  # Text embeddings
+    #"lm_head"        # Output projection
+#]
+
 
 # Metrics tracking class
 class MetricsTracker:
@@ -394,11 +403,11 @@ class AudioSample:
 
 
 class TTSDataset(Dataset):
-    """Dataset handling"""
+    """Dataset handling - supports both English and Spanish tokenizers"""
     def __init__(
         self,
         samples: List[AudioSample],
-        tokenizer: EnTokenizer,
+        tokenizer,  # Can be EnTokenizer or SpanishTokenizer
         s3_sr: int = S3_SR,
         s3gen_sr: int = S3GEN_SR,
         max_audio_length: float = MAX_AUDIO_LENGTH,
@@ -741,10 +750,28 @@ def main():
     model = ChatterboxTTS.from_pretrained(DEVICE)
     # Restart training
     #model = ChatterboxTTS.from_local("./checkpoints_lora/merged_model", DEVICE)
+    
+    # Replace tokenizer with Spanish version for Spanish training
+    print("🔄 Switching to Spanish tokenizer...")
+    spanish_tokenizer = SpanishTokenizer()
+    spanish_tokenizer.check_vocabset_sot_eot()  # Verify special tokens
+    
+    # CRITICAL: Resize model embeddings to match Spanish vocabulary
+    print(f"🔄 Resizing model embeddings for Spanish vocabulary...")
+    model = resize_t3_embeddings(model, spanish_tokenizer.vocab_size, DEVICE)
+    
+    # Replace the tokenizer
+    model.tokenizer = spanish_tokenizer
+    print(f"✅ Spanish tokenizer installed with {spanish_tokenizer.vocab_size:,} tokens")
 
     # Inject LoRA layers
     print("Injecting LoRA layers...")
-    target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    target_modules = TARGET_MODULES
+
+
+
+
+
     lora_layers = inject_lora_layers(
         model.t3.tfmr,
         target_modules,

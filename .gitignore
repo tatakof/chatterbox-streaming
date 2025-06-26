@@ -1,5 +1,9 @@
 .vscode
 
+
+checkpoint*
+audio_data*
+.venv*
 # Pylance
 pyrightconfig.json
 

@@ -30,8 +30,9 @@ from chatterbox.tts import ChatterboxTTS, punc_norm
 from chatterbox.models.s3gen import S3Gen, S3GEN_SR
 from chatterbox.models.s3tokenizer import S3_SR
 from chatterbox.models.voice_encoder import VoiceEncoder
-from chatterbox.models.tokenizers import EnTokenizer
+from chatterbox.models.tokenizers.tokenizer import EnTokenizer, SpanishTokenizer
 from chatterbox.models.t3.modules.cond_enc import T3Cond
+from chatterbox.models.t3.modules.t3_config import T3SpanishConfig, resize_t3_embeddings
 
 # Add matplotlib imports for metrics tracking
 import matplotlib
@@ -75,6 +76,17 @@ TOP_P = 0.95
 WER_WEIGHT = -1.0
 SPEAKER_SIM_WEIGHT = 1.0
 LENGTH_PENALTY_WEIGHT = -0.5
+
+TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+#TARGET_MODULES = [
+    #"q_proj", "v_proj", "k_proj", "o_proj", 
+    #"gate_proj", "up_proj", "down_proj",
+    #"embed_tokens",  # Text embeddings
+    #"lm_head"        # Output projection
+#]
+
+
 
 
 def safe_tensor_index(tensor: torch.Tensor, start: int, end: int, dim: int = 1) -> torch.Tensor:
@@ -1294,12 +1306,26 @@ def main():
         print("Loading Chatterbox TTS model...")
         model = ChatterboxTTS.from_pretrained(DEVICE)
         
+        # Replace tokenizer with Spanish version for Spanish training
+        print("🔄 Switching to Spanish tokenizer...")
+        spanish_tokenizer = SpanishTokenizer()
+        spanish_tokenizer.check_vocabset_sot_eot()  # Verify special tokens
+        
+        # CRITICAL: Resize model embeddings to match Spanish vocabulary
+        print(f"🔄 Resizing model embeddings for Spanish vocabulary...")
+        model = resize_t3_embeddings(model, spanish_tokenizer.vocab_size, DEVICE)
+        
+        # Replace the tokenizer
+        model.tokenizer = spanish_tokenizer
+        print(f"✅ Spanish tokenizer installed with {spanish_tokenizer.vocab_size:,} tokens")
+        
         if hasattr(model.t3.tfmr, 'gradient_checkpointing_enable'):
             model.t3.tfmr.gradient_checkpointing_enable()
             print("Enabled gradient checkpointing for transformer")
         
         print("Injecting LoRA layers...")
-        target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        target_modules = TARGET_MODULES
+        
         lora_layers = inject_lora_layers(
             model.t3.tfmr,
             target_modules,

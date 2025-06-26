@@ -17,7 +17,8 @@ def set_seed(seed: int):
 
 
 def load_model():
-    model = ChatterboxTTS.from_pretrained(DEVICE)
+    #model = ChatterboxTTS.from_pretrained(DEVICE)
+    model = ChatterboxTTS.from_local("./checkpoints_lora/merged_model", device='cuda:2')
     return model
 
 
