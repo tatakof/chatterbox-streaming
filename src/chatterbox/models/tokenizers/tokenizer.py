@@ -3,6 +3,7 @@ import logging
 import torch
 from tokenizers import Tokenizer
 from transformers import AutoTokenizer
+from pathlib import Path
 
 
 # Special tokens
@@ -55,10 +56,27 @@ class SpanishTokenizer:
     """Clean Spanish tokenizer for Chatterbox TTS - matches EnTokenizer interface"""
     
     def __init__(self, model_name="PlanTL-GOB-ES/roberta-base-bne"):
-        print(f"🔄 Loading Spanish tokenizer: {model_name}")
-        
-        # Load Spanish RoBERTa tokenizer  
-        self.base_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        """Create a Spanish-compatible tokenizer.
+
+        `model_name` can be either:
+          • A HF repo id such as "PlanTL-GOB-ES/roberta-base-bne" (default).
+          • A path to a *directory* already containing a tokenizer config.
+          • A direct path to a `tokenizer.json` file (as used by Chatterbox
+            checkpoints).  In that case we resolve the parent directory so
+            `AutoTokenizer.from_pretrained` can load the config properly.
+        """
+
+        # If a file path ending with .json is supplied, use its parent folder
+        possible_path = Path(str(model_name))
+        if possible_path.is_file() and possible_path.suffix == ".json":
+            resolved_path = str(possible_path.parent)
+        else:
+            resolved_path = model_name
+
+        print(f"🔄 Loading Spanish tokenizer: {resolved_path}")
+
+        # Load tokenizer (will work for local dir or HF repo id)
+        self.base_tokenizer = AutoTokenizer.from_pretrained(resolved_path)
         
         # Add our special tokens to the vocabulary
         special_tokens = {
@@ -70,7 +88,7 @@ class SpanishTokenizer:
         self.vocab_size = len(self.base_tokenizer)
         
         print(f"✅ Spanish tokenizer initialized:")
-        print(f"   Base model: {model_name}")
+        print(f"   Base model: {resolved_path}")
         print(f"   Vocabulary size: {self.vocab_size:,} tokens")
         print(f"   Added special tokens: {num_added}")
         

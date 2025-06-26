@@ -9,7 +9,7 @@ text = "Hola amiga, te quiero contar algo muy bueno!"
 print(f"🎯 Generating Spanish TTS for: '{text}'")
 
 wav = spanish_model.generate(text)
-ta.save("test-spanish-11.wav", wav, spanish_model.sr)
+ta.save("test-spanish-111.wav", wav, spanish_model.sr)
 
 print(f"✅ Spanish audio saved to: test-spanish-11.wav")
 print(f"📊 Audio shape: {wav.shape}")

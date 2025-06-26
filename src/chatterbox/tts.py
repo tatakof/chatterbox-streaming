@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen
-from .models.tokenizers import EnTokenizer
+from .models.tokenizers import EnTokenizer, SpanishTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
@@ -124,7 +124,8 @@ class ChatterboxTTS:
         t3: T3,
         s3gen: S3Gen,
         ve: VoiceEncoder,
-        tokenizer: EnTokenizer,
+        #tokenizer: EnTokenizer,
+        tokenizer: SpanishTokenizer,
         device: str,
         conds: Conditionals = None,
     ):
@@ -166,9 +167,14 @@ class ChatterboxTTS:
         )
         s3gen.to(device).eval()
 
-        tokenizer = EnTokenizer(
-            str(ckpt_dir / "tokenizer.json")
-        )
+        # Decide which tokenizer to load based on the checkpoint contents.
+        tokenizer_path = str(ckpt_dir / "tokenizer.json")
+        try:
+            tokenizer = EnTokenizer(tokenizer_path)
+            print("✅ Loaded English tokenizer (704 tokens)")
+        except Exception as en_err:
+            print(f"⚠️ English tokenizer failed to load ({en_err}). Falling back to SpanishTokenizer")
+            tokenizer = SpanishTokenizer(tokenizer_path)
 
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():

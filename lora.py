@@ -768,10 +768,6 @@ def main():
     print("Injecting LoRA layers...")
     target_modules = TARGET_MODULES
 
-
-
-
-
     lora_layers = inject_lora_layers(
         model.t3.tfmr,
         target_modules,
@@ -806,12 +802,20 @@ def main():
         pin_memory=True if DEVICE == 'cuda' else False
     )
     
-    # Setup optimizer (only LoRA parameters)
-    lora_params = []
+    # ---------------------------------------------------------------
+    # Setup optimizer – train LoRA *and* the new Spanish token rows
+    # ---------------------------------------------------------------
+    # Collect LoRA parameters
+    lora_params: List[torch.nn.Parameter] = []
     for layer in lora_layers.values():
         lora_params.extend([layer.lora_A, layer.lora_B])
-    
-    optimizer = AdamW(lora_params, lr=LEARNING_RATE)
+
+    # Collect the resized text embedding + head parameters so they can
+    # learn useful representations for the new Spanish vocabulary.
+    base_params: List[torch.nn.Parameter] = list(model.t3.text_emb.parameters()) + \
+                                              list(model.t3.text_head.parameters())
+
+    optimizer = AdamW(base_params + lora_params, lr=LEARNING_RATE)
     scheduler = CosineAnnealingLR(
         optimizer,
         T_max=len(train_loader) * EPOCHS,
@@ -937,13 +941,20 @@ def main():
     final_adapter_path = Path(CHECKPOINT_DIR) / "final_lora_adapter.pt"
     save_lora_adapter(lora_layers, str(final_adapter_path))
     
-    # Create and save merged model
-    print("Creating merged model...")
-    
-    # Clone the model state for merging
+    # ---------------------------------------------------------------
+    # Build merged model that already has Spanish vocabulary support
+    # ---------------------------------------------------------------
     merged_model = ChatterboxTTS.from_pretrained(DEVICE)
-    
-    # Re-inject LoRA layers and load final weights
+    merged_model = resize_t3_embeddings(merged_model, spanish_tokenizer.vocab_size, DEVICE)
+    merged_model.tokenizer = spanish_tokenizer
+
+    # Transfer the trained embedding & head weights
+    merged_model.t3.text_emb.weight.data = model.t3.text_emb.weight.data.clone()
+    merged_model.t3.text_head.weight.data = model.t3.text_head.weight.data.clone()
+    if merged_model.t3.text_head.bias is not None:
+        merged_model.t3.text_head.bias.data = model.t3.text_head.bias.data.clone()
+
+    # Re-inject LoRA layers and copy trained LoRA weights
     merged_lora_layers = inject_lora_layers(
         merged_model.t3.tfmr,
         target_modules,
@@ -951,34 +962,28 @@ def main():
         alpha=LORA_ALPHA,
         dropout=LORA_DROPOUT
     )
-    
-    # Copy trained weights to merged model's LoRA layers
     for name, layer in lora_layers.items():
         if name in merged_lora_layers:
             merged_lora_layers[name].lora_A.data = layer.lora_A.data.clone()
             merged_lora_layers[name].lora_B.data = layer.lora_B.data.clone()
-    
-    # Merge LoRA weights into base model
+
     merged_model = merge_lora_weights(merged_model, merged_lora_layers)
-    
+
     # Save merged model components
     merged_dir = Path(CHECKPOINT_DIR) / "merged_model"
     merged_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save each component
+
     torch.save(merged_model.ve.state_dict(), merged_dir / "ve.pt")
     torch.save(merged_model.t3.state_dict(), merged_dir / "t3_cfg.pt")
     torch.save(merged_model.s3gen.state_dict(), merged_dir / "s3gen.pt")
-    
-    # Copy tokenizer
-    import shutil
-    tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
-    shutil.copy(tokenizer_path, merged_dir / "tokenizer.json")
-    
+
+    # Save Spanish tokenizer alongside the model
+    spanish_tokenizer.save_pretrained(merged_dir, safe_serialization=False)
+
     # Save conditionals if they exist
     if model.conds:
         model.conds.save(merged_dir / "conds.pt")
-    
+
     print(f"Saved merged model to {merged_dir}")
     print("\nTraining complete! You can now:")
     print(f"1. Use the LoRA adapter: {final_adapter_path}")
@@ -1093,6 +1098,9 @@ def save_checkpoint(
        'loss': loss,
        'lora_state_dict': lora_state_dict,
        'optimizer_state_dict': optimizer.state_dict(),
+       # Store the full model weights so we keep the trained Spanish
+       # embedding/head layers and any other fine-tuned weights.
+       'model_state_dict': model.state_dict(),
    }
    
    torch.save(checkpoint, checkpoint_path)

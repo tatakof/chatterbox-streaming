@@ -15,6 +15,9 @@ CHECKPOINT_PATH = "./checkpoints_lora/checkpoint_epoch4_step3087.pt"  # Path to 
 OUTPUT_DIR = "./checkpoints_lora/merged_model"  # Where to save the merged model
 DEVICE = "cuda:1" if torch.cuda.is_available() else "cpu"
 
+# Spanish tokenizer model (same one used during training)
+SPANISH_TOKENIZER_MODEL = "PlanTL-GOB-ES/roberta-base-bne"
+
 # LoRA configuration (must match training config)
 LORA_RANK = 32
 LORA_ALPHA = 64
@@ -142,8 +145,8 @@ def save_merged_model(model: ChatterboxTTS, output_dir: Path, spanish_tokenizer=
         
     else:  # English tokenizer (704 tokens)
         print("🇺🇸 Detected English model - saving English tokenizer")
-        tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
-        shutil.copy(tokenizer_path, output_dir / "tokenizer.json")
+    tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
+    shutil.copy(tokenizer_path, output_dir / "tokenizer.json")
         print(f"✅ Saved English tokenizer with 704 tokens")
     
     # Save conditionals if they exist
@@ -174,10 +177,18 @@ def main():
     print(f"  - Loss: {checkpoint['loss']:.4f}")
     print(f"  - LoRA weights found: {len(checkpoint['lora_state_dict'])}")
     
-    # Load base model
+    # -----------------------------------------------------------
+    # Load base model **with Spanish vocabulary support**
+    # -----------------------------------------------------------
     print("\nLoading base Chatterbox model...")
     model = ChatterboxTTS.from_pretrained(DEVICE)
-    
+
+    # Prepare Spanish tokenizer and resize embeddings BEFORE we load
+    # the checkpoint weights so shapes match.
+    spanish_tokenizer = SpanishTokenizer(SPANISH_TOKENIZER_MODEL)
+    model = resize_t3_embeddings(model, spanish_tokenizer.vocab_size, DEVICE)
+    model.tokenizer = spanish_tokenizer
+
     # Inject LoRA layers
     print("\nInjecting LoRA layers...")
     lora_layers = inject_lora_layers(
@@ -189,6 +200,17 @@ def main():
     )
     print(f"Injected {len(lora_layers)} LoRA layers")
     
+    # -----------------------------------------------------------
+    # If the checkpoint contains the full model state (from new
+    # training script) load it so we get the trained embeddings.
+    # -----------------------------------------------------------
+    if 'model_state_dict' in checkpoint:
+        try:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print("Loaded `model_state_dict` from checkpoint – Spanish embeddings restored")
+        except Exception as e:
+            print(f"WARNING: Failed to load model_state_dict: {e}")
+
     # Load LoRA weights from checkpoint
     print("\nLoading LoRA weights from checkpoint...")
     loaded_count = 0
@@ -213,7 +235,7 @@ def main():
     # Save merged model
     output_path = Path(OUTPUT_DIR)
     print(f"\nSaving merged model to {output_path}...")
-    save_merged_model(model, output_path)
+    save_merged_model(model, output_path, spanish_tokenizer=spanish_tokenizer.base_tokenizer)
     
     print("\n" + "=" * 50)
     print("SUCCESS! Merged model saved.")

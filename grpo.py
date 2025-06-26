@@ -1221,7 +1221,7 @@ def compute_grpo_loss(
                                     if validate_tensor_operation(kl_div, f"kl div {idx}"):
                                         total_kl += kl_div
                 
-                del embeds, hidden_states
+                del embeds, hidden_states, speech_logits
                 if DEVICE == 'cuda':
                     torch.cuda.empty_cache()
                     
@@ -1358,11 +1358,17 @@ def main():
             pin_memory=True if DEVICE == 'cuda' else False
         )
         
-        lora_params = []
+        # ---------------------------------------------------------------
+        # Optimizer trains LoRA params *and* new Spanish embedding rows
+        # ---------------------------------------------------------------
+        lora_params: List[torch.nn.Parameter] = []
         for layer in lora_layers.values():
             lora_params.extend([layer.lora_A, layer.lora_B])
-        
-        optimizer = AdamW(lora_params, lr=LEARNING_RATE)
+
+        base_params: List[torch.nn.Parameter] = list(model.t3.text_emb.parameters()) + \
+                                              list(model.t3.text_head.parameters())
+
+        optimizer = AdamW(base_params + lora_params, lr=LEARNING_RATE)
         scheduler = CosineAnnealingLR(
             optimizer,
             T_max=len(train_loader) * EPOCHS,
@@ -1550,8 +1556,19 @@ def main():
         save_lora_adapter(lora_layers, str(final_adapter_path))
         
         print("Creating merged model...")
+        # ---------------------------------------------------------------
+        # Build merged model that already has Spanish vocab & weights
+        # ---------------------------------------------------------------
         merged_model = ChatterboxTTS.from_pretrained(DEVICE)
-        
+        merged_model = resize_t3_embeddings(merged_model, spanish_tokenizer.vocab_size, DEVICE)
+        merged_model.tokenizer = spanish_tokenizer
+
+        # copy embedding/head weights
+        merged_model.t3.text_emb.weight.data = model.t3.text_emb.weight.data.clone()
+        merged_model.t3.text_head.weight.data = model.t3.text_head.weight.data.clone()
+        if merged_model.t3.text_head.bias is not None:
+            merged_model.t3.text_head.bias.data = model.t3.text_head.bias.data.clone()
+
         merged_lora_layers = inject_lora_layers(
             merged_model.t3.tfmr,
             target_modules,
@@ -1559,25 +1576,23 @@ def main():
             alpha=LORA_ALPHA,
             dropout=LORA_DROPOUT
         )
-        
         for name, layer in lora_layers.items():
             if name in merged_lora_layers:
                 merged_lora_layers[name].lora_A.data = layer.lora_A.data.clone()
                 merged_lora_layers[name].lora_B.data = layer.lora_B.data.clone()
-        
+
         merged_model = merge_lora_weights(merged_model, merged_lora_layers)
-        
+
         merged_dir = Path(CHECKPOINT_DIR) / "merged_grpo_model"
         merged_dir.mkdir(parents=True, exist_ok=True)
-        
+
         torch.save(merged_model.ve.state_dict(), merged_dir / "ve.pt")
         torch.save(merged_model.t3.state_dict(), merged_dir / "t3_cfg.pt")
         torch.save(merged_model.s3gen.state_dict(), merged_dir / "s3gen.pt")
-        
-        import shutil
-        tokenizer_path = Path(hf_hub_download(repo_id="ResembleAI/chatterbox", filename="tokenizer.json"))
-        shutil.copy(tokenizer_path, merged_dir / "tokenizer.json")
-        
+
+        # save spanish tokenizer
+        spanish_tokenizer.save_pretrained(merged_dir, safe_serialization=False)
+
         print(f"Saved GRPO merged model to {merged_dir}")
         print("\nTraining complete!")
         
@@ -1700,6 +1715,7 @@ def save_checkpoint(
             'metric': metric,
             'lora_state_dict': lora_state_dict,
             'optimizer_state_dict': optimizer.state_dict(),
+            'model_state_dict': model.state_dict(),  # keep trained embeddings
         }
         
         torch.save(checkpoint, checkpoint_path)
