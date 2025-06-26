@@ -5,16 +5,20 @@ from pathlib import Path
 from typing import Dict, List
 from dataclasses import dataclass
 
+from chatterbox.models.tokenizers.tokenizer import EnTokenizer, SpanishTokenizer
+
+
+
 # Import Chatterbox components
 from chatterbox.tts import ChatterboxTTS
 from huggingface_hub import hf_hub_download
 import shutil
 
 # Hardcoded configuration - MODIFY THESE
-CHECKPOINT_PATH = "./checkpoints_lora/checkpoint_epoch4_step3087.pt"  # Path to your checkpoint
-#CHECKPOINT_PATH = "./checkpoints_grpo_enTokenizer/checkpoint_epoch0_step88.pt"  # Path to your checkpoint
-OUTPUT_DIR = "./checkpoints_lora/merged_model"  # Where to save the merged model
-#OUTPUT_DIR = "./checkpoints_grpo_enTokenizer/merged_model"  # Where to save the merged model
+#CHECKPOINT_PATH = "./checkpoints_lora/checkpoint_epoch4_step3087.pt"  # Path to your checkpoint
+CHECKPOINT_PATH = "./checkpoints_grpo_enTokenizer/checkpoint_epoch0_step88.pt"  # Path to your checkpoint
+#OUTPUT_DIR = "./checkpoints_lora/merged_model"  # Where to save the merged model
+OUTPUT_DIR = "./checkpoints_grpo_enTokenizer/merged_model"  # Where to save the merged model
 DEVICE = "cuda:1" if torch.cuda.is_available() else "cpu"
 
 # Spanish tokenizer model (same one used during training)
@@ -171,12 +175,19 @@ def main():
     
     # Load the checkpoint
     print("Loading checkpoint...")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    #checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    ## try to avoid WeightsUnpickler error:
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
     
-    print(f"Checkpoint info:")
-    print(f"  - Epoch: {checkpoint['epoch']}")
-    print(f"  - Step: {checkpoint['step']}")
-    print(f"  - Loss: {checkpoint['loss']:.4f}")
+    print("Checkpoint info:")
+    print(f"  - Epoch: {checkpoint.get('epoch', '?')}")
+    print(f"  - Step:  {checkpoint.get('step',  '?')}")
+    if 'loss' in checkpoint:
+        print(f"  - Loss:  {checkpoint['loss']:.4f}")
+    elif 'metric' in checkpoint:
+        print(f"  - Metric: {checkpoint['metric']:.4f}")   # GRPO stores reward
+    else:
+        print("  - No loss/metric field found")
     print(f"  - LoRA weights found: {len(checkpoint['lora_state_dict'])}")
     
     # -----------------------------------------------------------
@@ -185,11 +196,28 @@ def main():
     print("\nLoading base Chatterbox model...")
     model = ChatterboxTTS.from_pretrained(DEVICE)
 
-    # Prepare Spanish tokenizer and resize embeddings BEFORE we load
-    # the checkpoint weights so shapes match.
-    spanish_tokenizer = SpanishTokenizer(SPANISH_TOKENIZER_MODEL)
-    model = resize_t3_embeddings(model, spanish_tokenizer.vocab_size, DEVICE)
-    model.tokenizer = spanish_tokenizer
+    # Does the checkpoint contain an embedding matrix?
+    vocab_in_ckpt = None
+    if 'model_state_dict' in checkpoint:
+        for key in checkpoint['model_state_dict'].keys():
+            if key.endswith('text_emb.weight'):
+                vocab_in_ckpt = checkpoint['model_state_dict'][key].size(0)
+                break
+    # Fallback: use live model size
+    if vocab_in_ckpt is None:
+        vocab_in_ckpt = model.t3.text_emb.num_embeddings
+
+    print(f"⎈ Checkpoint text-vocab size: {vocab_in_ckpt}")
+
+    if vocab_in_ckpt > 10000:          # Spanish run
+        print("🔄 Switching to Spanish tokenizer")
+        spanish_tokenizer = SpanishTokenizer(SPANISH_TOKENIZER_MODEL)
+        model = resize_t3_embeddings(model, spanish_tokenizer.vocab_size, DEVICE)
+        model.tokenizer = spanish_tokenizer
+        tok_for_saving = spanish_tokenizer.base_tokenizer
+    else:                               # English run
+        print("Using English tokenizer (704 tokens)")
+        tok_for_saving = None
 
     # Inject LoRA layers
     print("\nInjecting LoRA layers...")
@@ -237,7 +265,7 @@ def main():
     # Save merged model
     output_path = Path(OUTPUT_DIR)
     print(f"\nSaving merged model to {output_path}...")
-    save_merged_model(model, output_path, spanish_tokenizer=spanish_tokenizer.base_tokenizer)
+    save_merged_model(model, output_path, spanish_tokenizer=tok_for_saving)
     
     print("\n" + "=" * 50)
     print("SUCCESS! Merged model saved.")
