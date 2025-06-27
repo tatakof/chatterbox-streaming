@@ -42,7 +42,7 @@ from collections import deque
 # Hardcoded configuration
 AUDIO_DATA_DIR = "./audio_data"
 BATCH_SIZE = 1
-EPOCHS = 10
+EPOCHS = 3
 LEARNING_RATE = 2e-5  
 WARMUP_STEPS = 500 
 MAX_AUDIO_LENGTH = 400.0  
@@ -1098,9 +1098,10 @@ def save_checkpoint(
        'loss': loss,
        'lora_state_dict': lora_state_dict,
        'optimizer_state_dict': optimizer.state_dict(),
-       # Store the full model weights so we keep the trained Spanish
-       # embedding/head layers and any other fine-tuned weights.
-       'model_state_dict': model.state_dict(),
+       # Save only T3 sub-module weights (text embeddings & any fine-tuned params)
+       # instead of calling state_dict() on the ChatterboxTTS wrapper which
+       # isn't a torch.nn.Module.
+       'model_state_dict': model.t3.state_dict(),
    }
    
    torch.save(checkpoint, checkpoint_path)
