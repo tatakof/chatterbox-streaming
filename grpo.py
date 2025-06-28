@@ -1364,7 +1364,7 @@ def main():
         lora_params: List[torch.nn.Parameter] = []
         for layer in lora_layers.values():
             lora_params.extend([layer.lora_A, layer.lora_B])
-
+        
         base_params: List[torch.nn.Parameter] = list(model.t3.text_emb.parameters()) + \
                                               list(model.t3.text_head.parameters())
 
@@ -1568,7 +1568,7 @@ def main():
         merged_model.t3.text_head.weight.data = model.t3.text_head.weight.data.clone()
         if merged_model.t3.text_head.bias is not None:
             merged_model.t3.text_head.bias.data = model.t3.text_head.bias.data.clone()
-
+        
         merged_lora_layers = inject_lora_layers(
             merged_model.t3.tfmr,
             target_modules,
@@ -1580,19 +1580,19 @@ def main():
             if name in merged_lora_layers:
                 merged_lora_layers[name].lora_A.data = layer.lora_A.data.clone()
                 merged_lora_layers[name].lora_B.data = layer.lora_B.data.clone()
-
+        
         merged_model = merge_lora_weights(merged_model, merged_lora_layers)
-
+        
         merged_dir = Path(CHECKPOINT_DIR) / "merged_grpo_model"
         merged_dir.mkdir(parents=True, exist_ok=True)
-
+        
         torch.save(merged_model.ve.state_dict(), merged_dir / "ve.pt")
         torch.save(merged_model.t3.state_dict(), merged_dir / "t3_cfg.pt")
         torch.save(merged_model.s3gen.state_dict(), merged_dir / "s3gen.pt")
-
+        
         # save spanish tokenizer
         spanish_tokenizer.save_pretrained(merged_dir, safe_serialization=False)
-
+        
         print(f"Saved GRPO merged model to {merged_dir}")
         print("\nTraining complete!")
         

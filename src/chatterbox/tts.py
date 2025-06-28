@@ -148,13 +148,44 @@ class ChatterboxTTS:
         else:
             map_location = None
 
+        # --------------------------------------------------------------
+        # 1) Load tokenizer first – we need its vocab size to adapt T3
+        # --------------------------------------------------------------
+        tokenizer_path = str(ckpt_dir / "tokenizer.json")
+        try:
+            tokenizer = EnTokenizer(tokenizer_path)
+        except Exception as en_err:
+            print(f"⚠️ English tokenizer failed to load ({en_err}). Falling back to SpanishTokenizer")
+            tokenizer = SpanishTokenizer(tokenizer_path)
+
+        # --------------------------------------------------------------
+        # 2) Build model components
+        # --------------------------------------------------------------
+
         ve = VoiceEncoder()
-        ve.load_state_dict(
-            torch.load(ckpt_dir / "ve.pt", map_location=map_location)
-        )
+        ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", map_location=map_location))
         ve.to(device).eval()
 
         t3 = T3()
+
+        # If tokenizer has a larger vocab, resize T3 before loading weights
+        try:
+            current_vocab = t3.text_emb.num_embeddings
+            target_vocab = tokenizer.vocab_size if hasattr(tokenizer, "vocab_size") else current_vocab
+            if target_vocab > current_vocab:
+                print(f"🔧 Pre-resizing text embeddings: {current_vocab} → {target_vocab}")
+                from .models.t3.modules.t3_config import resize_t3_embeddings
+
+                class _Wrap:
+                    pass
+
+                _tmp = _Wrap()
+                _tmp.t3 = t3
+                t3 = resize_t3_embeddings(_tmp, target_vocab, device).t3
+        except Exception as pre_resize_err:
+            print(f"⚠️ Pre-resize failed: {pre_resize_err}")
+
+        # Now load the checkpoint weights – shapes should match
         t3_state = torch.load(ckpt_dir / "t3_cfg.pt", map_location=map_location)
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
@@ -162,43 +193,12 @@ class ChatterboxTTS:
         t3.to(device).eval()
 
         s3gen = S3Gen()
-        s3gen.load_state_dict(
-            torch.load(ckpt_dir / "s3gen.pt", map_location=map_location)
-        )
+        s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", map_location=map_location))
         s3gen.to(device).eval()
-
-        # Decide which tokenizer to load based on the checkpoint contents.
-        tokenizer_path = str(ckpt_dir / "tokenizer.json")
-        try:
-            tokenizer = EnTokenizer(tokenizer_path)
-            print("✅ Loaded English tokenizer (704 tokens)")
-        except Exception as en_err:
-            print(f"⚠️ English tokenizer failed to load ({en_err}). Falling back to SpanishTokenizer")
-            tokenizer = SpanishTokenizer(tokenizer_path)
 
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
-
-        # ------------------------------------------------------------------
-        # Safety net: if checkpoint contains English-sized embeddings (704)
-        # but a larger tokenizer is loaded (e.g., 50 k Spanish), automatically
-        # resize embeddings so inference doesn't crash.  This keeps the model
-        # usable immediately after a merge even if the embeddings weren't
-        # copied correctly.  New rows are random until you fine-tune again.
-        # ------------------------------------------------------------------
-        try:
-            current_vocab = t3.text_emb.num_embeddings
-            target_vocab = tokenizer.vocab_size if hasattr(tokenizer, "vocab_size") else current_vocab
-            if target_vocab > current_vocab:
-                print(f"🔧 Auto-resizing text embeddings: {current_vocab} → {target_vocab}")
-                from .models.t3.modules.t3_config import resize_t3_embeddings
-                t3_model_container = cls(t3, s3gen, ve, tokenizer, device, conds=conds)
-                t3_model_container = resize_t3_embeddings(t3_model_container, target_vocab, device)
-                # unpack updated sub-modules
-                t3, s3gen, ve = t3_model_container.t3, t3_model_container.s3gen, t3_model_container.ve
-        except Exception as auto_resize_err:
-            print(f"⚠️ Auto-resize failed: {auto_resize_err}")
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 

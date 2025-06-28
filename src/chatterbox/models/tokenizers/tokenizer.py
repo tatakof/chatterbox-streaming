@@ -20,6 +20,13 @@ class EnTokenizer:
         self.tokenizer: Tokenizer = Tokenizer.from_file(vocab_file_path)
         self.check_vocabset_sot_eot()
 
+        # Helpful debug print so we know what we really loaded
+        try:
+            _vs = len(self.tokenizer.get_vocab())
+            print(f"✅ Loaded tokenizer from '{vocab_file_path}' containing {_vs:,} tokens")
+        except Exception:
+            pass
+
     def check_vocabset_sot_eot(self):
         voc = self.tokenizer.get_vocab()
         assert SOT in voc
@@ -51,6 +58,10 @@ class EnTokenizer:
         txt = txt.replace(UNK, '')
         return txt
 
+    # Allow loader utilities to query size uniformly
+    @property
+    def vocab_size(self):
+        return len(self.tokenizer.get_vocab())
 
 class SpanishTokenizer:
     """Clean Spanish tokenizer for Chatterbox TTS - matches EnTokenizer interface"""

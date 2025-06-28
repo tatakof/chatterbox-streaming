@@ -7,6 +7,26 @@ from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
+# ------------------------------------------------------------------
+# CLI ARG PARSING  – allows overriding of GPU device, etc.
+# ------------------------------------------------------------------
+import argparse
+
+_arg_parser = argparse.ArgumentParser(
+    description="Spanish LoRA fine-tuning for Chatterbox TTS",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+)
+_arg_parser.add_argument(
+    "--device",
+    type=str,
+    default=None,
+    help="PyTorch device string, e.g. 'cuda:0', 'cuda:2', or 'cpu'.  If omitted we auto-select.",
+)
+
+# Parse *known* args so we don't swallow e.g. torchrun flags when running
+# under distributed launchers.
+_cli_args, _ = _arg_parser.parse_known_args()
+
 from transformers import pipeline
 import torch
 import torch.nn as nn
@@ -42,7 +62,7 @@ from collections import deque
 # Hardcoded configuration
 AUDIO_DATA_DIR = "./audio_data"
 BATCH_SIZE = 1
-EPOCHS = 3
+EPOCHS = 1
 LEARNING_RATE = 2e-5  
 WARMUP_STEPS = 500 
 MAX_AUDIO_LENGTH = 400.0  
@@ -53,7 +73,11 @@ LORA_DROPOUT = 0.05
 GRADIENT_ACCUMULATION_STEPS = 8
 SAVE_EVERY_N_STEPS = 200
 CHECKPOINT_DIR = "checkpoints_lora"
-DEVICE = "cuda:2" if torch.cuda.is_available() else "cpu"
+# Allow CLI to override the CUDA device selection.
+if _cli_args.device is not None:
+    DEVICE = _cli_args.device
+else:
+    DEVICE = "cuda:2" if torch.cuda.is_available() else "cpu"
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 MAX_TEXT_LENGTH = 1000
 VALIDATION_SPLIT = 0.1
@@ -944,6 +968,21 @@ def main():
     # ---------------------------------------------------------------
     # Build merged model that already has Spanish vocabulary support
     # ---------------------------------------------------------------
+    # IMPORTANT: `resize_t3_embeddings` mutated the *shared* default
+    # T3Config instance (which is the default argument for T3.__init__).
+    # That breaks a fresh `ChatterboxTTS.from_pretrained()` call because
+    # the new, still-English checkpoint is loaded into a model that now
+    # expects a 50 k-token embedding.  We therefore reset the default
+    # config back to its original English size before we create the
+    # fresh model to merge into.
+
+
+    from chatterbox.models.t3.t3 import T3 as _T3Class
+
+    if _T3Class.__init__.__defaults__ and len(_T3Class.__init__.__defaults__) > 0:
+        _default_hp = _T3Class.__init__.__defaults__[0]
+        _default_hp.text_tokens_dict_size = 704  # restore English vocab size
+
     merged_model = ChatterboxTTS.from_pretrained(DEVICE)
     merged_model = resize_t3_embeddings(merged_model, spanish_tokenizer.vocab_size, DEVICE)
     merged_model.tokenizer = spanish_tokenizer
