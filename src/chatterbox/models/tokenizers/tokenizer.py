@@ -177,3 +177,16 @@ class SpanishTokenizer:
             status = "❌ UNK" if has_unk else "✅ OK"
             
             print(f"  '{word}' → {tokens} → '{decoded}' {status}")
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    def save_pretrained(self, save_directory: str, **kwargs):
+        """Persist the underlying tokenizer to *save_directory*.
+
+        This mirrors the HuggingFace `PreTrainedTokenizer` API so that
+        training scripts can simply call `spanish_tokenizer.save_pretrained(...)`.
+        Any extra keyword arguments are forwarded verbatim.
+        """
+        Path(save_directory).mkdir(parents=True, exist_ok=True)
+        return self.base_tokenizer.save_pretrained(save_directory, **kwargs)
